@@ -1,0 +1,24 @@
+# ── Core data / IO ───────────────────────────────────────────────────────────
+pandas
+openpyxl          # required by pandas for .to_excel()
+numpy
+
+# ── Spatial / geometry ────────────────────────────────────────────────────────
+geojson
+shapely
+rasterio
+
+# ── Image IO ─────────────────────────────────────────────────────────────────
+tifffile
+aicsimageio
+Pillow
+
+# ── Scientific computing ──────────────────────────────────────────────────────
+scipy
+scikit-image
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib
+
+# ── Array storage ─────────────────────────────────────────────────────────────
+zarr
