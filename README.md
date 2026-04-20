@@ -1,32 +1,71 @@
 # Xenium Axon Segmentation Pipeline
 
-A multi-step Python pipeline for processing **10x Xenium spatial transcriptomics** data.  
-It converts raw cell/nucleus boundary CSV files into GeoJSON annotations, rasterizes them into binary masks, subtracts cell bodies to isolate axon regions, and produces publication-quality visualizations.
+A multi-step Python pipeline for processing **10x Xenium spatial transcriptomics** data. The pipeline converts raw cell/nucleus boundary CSV files into pixel-scaled GeoJSON annotations, rasterizes them into binary masks, isolates axon regions by subtracting cell bodies, and cross-validates the final segmentation by visualizing the Xenium Ranger output.
+
+Two rounds of **Xenium Ranger Import Segmentation** are performed between the Python steps — the first to incorporate manually corrected nucleus annotations, and the second to import the final cell boundary and axon masks into a new Xenium bundle.
 
 ---
 
-## Pipeline Overview
+## End-to-End Workflow
+
+The full workflow alternates between Python scripts and manual steps in Xenium Ranger:
 
 ```
-Raw Xenium Bundle
-      │
-      ▼
-Step 1a  CSV boundaries → GeoJSON (pixel-scaled)
-      │
-      ▼
-Step 1b  GeoJSON validation
-      │
-      ▼
-Step 2a  Cell boundaries CSV → pixel-scaled GeoJSON          ← IS-segmented bundles
-      │
-      ▼
-Step 2b  Cell boundary GeoJSON → binary mask (.npy + .png)
-      │
-      ▼
-Step 2c  Axon GeoJSON + cell mask → filtered axon mask
-      │
-      ▼
-Step 3   cells.zarr.zip → nucleus & cell mask visualization
+┌─────────────────────────────────────────────────────────┐
+│               RAW XENIUM BUNDLE                         │
+│   (cell_boundaries.csv.gz, nucleus_boundaries.csv.gz)   │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+             Step 1a — CSV → GeoJSON
+         (pixel-scale cell & nucleus boundaries)
+                         │
+                         ▼
+             Step 1b — GeoJSON Validation
+         (check geometry, CRS, polygon validity)
+                         │
+                         ▼
+          ┌──────────────────────────────┐
+          │   MANUAL CORRECTION          │
+          │  Edit nucleus GeoJSON in     │
+          │  QuPath / annotation tool    │
+          └──────────────┬───────────────┘
+                         │
+                         ▼
+          ┌──────────────────────────────┐
+          │  XENIUM RANGER               │
+          │  Import Segmentation         │  ← Round 1
+          │  Input: corrected nucleus    │
+          │         GeoJSON (Step 1a/1b) │
+          │  Output: IS bundle (Stage1)  │
+          └──────────────┬───────────────┘
+                         │
+                         ▼
+             Step 2a — Cell Boundaries CSV → GeoJSON
+          (from IS bundle: cell_boundaries.csv.gz)
+                         │
+                         ▼
+             Step 2b — GeoJSON → Binary Cell Mask
+                  (.npy + .png per bundle)
+                         │
+                         ▼
+             Step 2c — Axon Mask Creation
+          (axon GeoJSON − cell mask → filtered axon mask)
+                         │
+                         ▼
+          ┌──────────────────────────────┐
+          │  XENIUM RANGER               │
+          │  Import Segmentation         │  ← Round 2
+          │  Inputs:                     │
+          │   • Step 2a cell GeoJSON     │
+          │   • Step 2c axon mask (.npy) │
+          │  Output: IS bundle (Stage2)  │
+          └──────────────┬───────────────┘
+                         │
+                         ▼
+             Step 3 — cells.zarr.zip Visualization
+          (cross-validate: nucleus & cell masks match
+           manual annotations imported correctly?)
 ```
 
 ---
@@ -71,7 +110,6 @@ pip install -r requirements.txt
 | `scikit-image` | Global component relabeling |
 | `matplotlib` | Mask visualization plots |
 | `zarr` | Reading Xenium `.zarr.zip` cell segmentation files |
-| `aicsimageio` | OME-TIFF reading (Step 2c) |
 
 > **Note:** Install `zarr<3` (`pip install "zarr<3"`) for compatibility with Xenium-generated zarr v2 files.
 
@@ -79,13 +117,11 @@ pip install -r requirements.txt
 
 ## Input Data
 
-Each pipeline step expects **Xenium bundle folders** organized like this:
-
 ```
 Stage1_IS/Batch1/
 └── output-XETG00216__<slide>__<region>__<date>__<time>_im_segment_stage1/
     ├── morphology_focus/
-    │   └── *.ome.tif               ← morphology image (used for pixel scale + dimensions)
+    │   └── *.ome.tif               ← morphology image (pixel scale + dimensions)
     ├── cell_boundaries.csv.gz      ← cell polygon vertices in microns
     └── nucleus_boundaries.csv.gz   ← nucleus polygon vertices in microns
 
@@ -95,7 +131,7 @@ Axon_Boundary_GeoJSON/Batch1/
 
 Stage2_IS/
 └── <bundle>/
-    └── cells.zarr.zip              ← Xenium cell segmentation zarr archive
+    └── cells.zarr.zip              ← Xenium Ranger output after Round 2 import
 ```
 
 ---
@@ -122,7 +158,7 @@ nucleus_boundaries_pixel_scaled.geojson
 
 **Script:** `Step1b_Corrected_NucleusBoundaries_GeoJson_validation.py`
 
-Validates a GeoJSON file for:
+Validates a GeoJSON file (typically the manually corrected nucleus boundaries) for:
 - Correct `FeatureCollection` structure
 - Compatible coordinate reference system (pixel, not lat/lon)
 - Valid polygon geometries (no self-intersections)
@@ -135,16 +171,38 @@ Writes a `.log` file summarising errors and warnings.
 
 ---
 
+### Manual Step — Correct Nucleus Annotations
+
+After Step 1b, the `nucleus_boundaries_pixel_scaled.geojson` is reviewed and corrected manually (e.g. in QuPath or a GIS annotation tool). Corrections may include:
+- Adding missing nuclei
+- Removing false positives
+- Adjusting polygon boundaries
+
+The corrected GeoJSON is then used as input for **Xenium Ranger Round 1**.
+
+---
+
+### Xenium Ranger — Round 1: Import Segmentation
+
+Run Xenium Ranger's **Import Segmentation** pipeline using the corrected nucleus GeoJSON from Step 1a/1b. This re-segments the raw Xenium bundle incorporating the manually corrected nuclear annotations.
+
+**Input:** Corrected `nucleus_boundaries_pixel_scaled.geojson`  
+**Output:** A new Import-Segmented (IS) Xenium bundle saved under `Stage1_IS/Batch1/`
+
+This IS bundle is the starting point for Steps 2a–2c.
+
+---
+
 ### Step 2a — Cell Boundaries to Pixel-Scaled GeoJSON
 
 **Script:** `Step2a_CellBoundaries_2_GeoJson.py`
 
-Reads `cell_boundaries.csv.gz` from IS-segmented Xenium bundles and converts micron coordinates to pixel coordinates using the OME-TIFF pixel size. Saves one GeoJSON per bundle and cross-validates cell counts.
+Reads `cell_boundaries.csv.gz` from the **Stage 1 IS bundles** and converts micron coordinates to pixel coordinates using the OME-TIFF pixel size. Saves one GeoJSON per bundle and cross-validates cell counts.
 
 **Configure in `main()`:**
 ```python
-main_path   = Path("...Stage1_IS/Batch1/")          # input bundles
-Output_path = Path("...Stage1_Cell_Boundaries_2_GeoJSON/Batch1")  # output root
+main_path   = Path("...Stage1_IS/Batch1/")          # IS bundles from Round 1
+Output_path = Path("...Stage1_Cell_Boundaries_2_GeoJSON/Batch1")
 ```
 
 **Output per bundle** (`Output_path/<bundle>/`):
@@ -165,11 +223,11 @@ cell_boundaries_pixel_scaled.geojson
 
 ---
 
-### Step 2b — GeoJSON to Binary Mask
+### Step 2b — GeoJSON to Binary Cell Mask
 
 **Script:** `Step2b_CellBoundaries_GeoJson_2_Mask.py`
 
-Rasterizes `cell_boundaries_pixel_scaled.geojson` (from Step 2a) onto a canvas matching the OME-TIFF image dimensions to produce a binary mask.
+Rasterizes `cell_boundaries_pixel_scaled.geojson` (from Step 2a) onto a canvas matching the OME-TIFF image dimensions to produce a binary cell body mask.
 
 **Configure in `main()`:**
 ```python
@@ -193,7 +251,7 @@ Output_path = Path("...Stage1_Cell_Boundaries_2_GeoJSON/Batch1")
 | Mask NPY / PNG | Full output paths |
 | Status | `OK`, `SKIPPED`, or `ERROR` |
 
-> **Run this before Step 2c.** The `.npy` mask is used as input for cell body subtraction.
+> **Run before Step 2c.** The `.npy` mask is used for cell body subtraction in the axon isolation step.
 
 ---
 
@@ -201,10 +259,11 @@ Output_path = Path("...Stage1_Cell_Boundaries_2_GeoJSON/Batch1")
 
 **Script:** `Step2c_AxonMask_Creation.py`
 
-The core axon isolation step:
-1. Loads the axon annotation GeoJSON
+The core axon isolation step. Axon polygons annotated in QuPath/GIS are provided as GeoJSON; this step rasterizes them and subtracts the cell body mask so that only axon pixels outside cell bodies are retained.
+
+1. Loads the axon annotation GeoJSON (`Axon_Boundary_GeoJSON/Batch1/<bundle>/`)
 2. Rasterizes axon polygons onto the image canvas (unique ID per connected component)
-3. **Subtracts** the cell boundary mask (Step 2b) to remove cell body overlap
+3. **Subtracts** the cell boundary mask from Step 2b to remove cell body overlap
 4. Relabels connected components globally
 5. Filters out small components (< 1000 pixels)
 6. Saves colored visualizations
@@ -242,11 +301,25 @@ cell_mask_root = Path("...Stage1_Cell_Boundaries_2_GeoJSON/Batch1")
 
 ---
 
-### Step 3 — Zarr Cell Mask Visualization
+### Xenium Ranger — Round 2: Import Segmentation
+
+After Steps 2a–2c, run Xenium Ranger's **Import Segmentation** pipeline a second time, now providing both the cell boundary GeoJSON and the filtered axon mask. This produces a final IS bundle where cell and axon labels are embedded in the Xenium data model.
+
+**Inputs:**
+- `cell_boundaries_pixel_scaled.geojson` (Step 2a output)
+- `<bundle>_FilteredAxon.npy` (Step 2c output)
+
+**Output:** A new IS Xenium bundle saved under `Stage2_IS/<bundle>/`, containing `cells.zarr.zip`
+
+---
+
+### Step 3 — Zarr Cell Mask Visualization (Cross-Validation)
 
 **Script:** `Step3_Cells_zarr_plotting.py`
 
-Reads the `cells.zarr.zip` archive produced by Xenium segmentation, extracts nucleus and cell masks, colorizes them with random per-ID colors, and saves a side-by-side high-resolution plot.
+Reads the `cells.zarr.zip` archive from the **Stage 2 IS bundle** (Round 2 output), extracts the nucleus and cell masks embedded by Xenium Ranger, and saves a side-by-side 600 DPI plot.
+
+**Purpose:** Cross-validate that the manual cell and axon annotations were imported correctly into the Xenium bundle. The colorized nucleus and cell masks should match the original QuPath annotations.
 
 **Configure in `main()`:**
 ```python
@@ -287,12 +360,26 @@ python folder_creation.py
 ## Execution Order
 
 ```
-python Step1a_Nucleus_Cell_boundaries_csv_2_geojson.py   # (optional — standard bundles)
-python Step1b_Corrected_NucleusBoundaries_GeoJson_validation.py  # (optional — validate)
-python Step2a_CellBoundaries_2_GeoJson.py                # IS bundles → GeoJSON
-python Step2b_CellBoundaries_GeoJson_2_Mask.py           # GeoJSON → cell boundary mask
-python Step2c_AxonMask_Creation.py                       # axon GeoJSON + mask → axon mask
-python Step3_Cells_zarr_plotting.py                      # zarr → visualization
+# ── Python Steps (Round 1 prep) ──────────────────────────────────────────
+python Step1a_Nucleus_Cell_boundaries_csv_2_geojson.py
+python Step1b_Corrected_NucleusBoundaries_GeoJson_validation.py
+
+# ── Manual: correct nucleus GeoJSON annotations ──────────────────────────
+# (edit in QuPath or GIS tool)
+
+# ── Xenium Ranger Round 1: Import Segmentation ───────────────────────────
+# Input: corrected nucleus GeoJSON → Output: Stage1_IS bundles
+
+# ── Python Steps (Round 2 prep) ──────────────────────────────────────────
+python Step2a_CellBoundaries_2_GeoJson.py
+python Step2b_CellBoundaries_GeoJson_2_Mask.py
+python Step2c_AxonMask_Creation.py
+
+# ── Xenium Ranger Round 2: Import Segmentation ───────────────────────────
+# Inputs: Step 2a GeoJSON + Step 2c .npy → Output: Stage2_IS bundles
+
+# ── Python Step (Cross-Validation) ───────────────────────────────────────
+python Step3_Cells_zarr_plotting.py
 ```
 
 ---
